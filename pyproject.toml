@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "devpost-validator"
+version = "0.1.0"
+description = "A tool to validate DevPost submissions for authenticity and rule compliance"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "ArjunSharda", email = "sharda.aj17@gmail.com"},
+]
+dependencies = [
+    "typer>=0.15.2",
+    "rich>=13.9.4",
+    "PyGithub>=2.6.1",
+    "requests>=2.32.3",
+    "pydantic>=2.10.6",
+    "keyring>=25.6.0",
+    "python-dateutil>=2.9.0.post0",
+    "gitpython>=3.1.44",
+    "beautifulsoup4>=4.12.3",
+]
+
+[project.scripts]
+devpost-validator = "devpost_validator.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/devpost_validator"]

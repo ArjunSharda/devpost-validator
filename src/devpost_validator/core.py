@@ -779,3 +779,35 @@ class DevPostValidator:
 
     def get_validation_history(self, limit: int = 100) -> List[Dict[str, Any]]:
         return self.validation_history[-limit:]
+
+    def load_plugin(self, plugin_path: str) -> bool:
+        """
+        Load a plugin into the validator.
+        
+        Args:
+            plugin_path: Path to the plugin file
+            
+        Returns:
+            True if plugin was loaded successfully, False otherwise
+        """
+        return self.rule_engine.load_plugin(plugin_path)
+    
+    def unload_plugin(self, plugin_name: str) -> bool:
+        """
+        Unload a specific plugin by name.
+        
+        Args:
+            plugin_name: Name of the plugin to unload
+            
+        Returns:
+            True if plugin was unloaded successfully, False otherwise
+        """
+        return self.rule_engine.unload_plugin(plugin_name)
+        
+    def get_loaded_plugins(self):
+        """Get all currently loaded plugins."""
+        return self.rule_engine.get_loaded_plugins()
+        
+    def get_plugin_info(self):
+        """Get detailed information about all loaded plugins."""
+        return self.rule_engine.get_plugin_info()

@@ -5,6 +5,11 @@ import sys
 from pathlib import Path
 import json
 import os
+import importlib
+import inspect
+from typing import List, Dict, Any, Optional, Type, Union
+
+from .plugin_base import PluginBase
 
 
 class RuleEngine:
@@ -12,6 +17,7 @@ class RuleEngine:
         self.rules = []
         self.custom_rules = []
         self.plugins = []
+        self.plugin_instances = []
         self.rule_dir = Path.home() / ".devpost-validator" / "rules"
         self.rule_dir.mkdir(exist_ok=True, parents=True)
         self._load_rules()
@@ -161,6 +167,14 @@ class RuleEngine:
                 except Exception:
                     pass
 
+        for plugin_instance in self.plugin_instances:
+            try:
+                plugin_results = plugin_instance.check_content(content)
+                if plugin_results:
+                    results.extend(plugin_results)
+            except Exception as e:
+                print(f"Error in plugin {plugin_instance.name}: {e}")
+
         return results
 
     def add_rule(self, name: str, pattern: str, description: str, severity: str = "medium") -> bool:
@@ -234,21 +248,90 @@ class RuleEngine:
 
     def load_plugin(self, plugin_path: str) -> bool:
         try:
-            spec = importlib.util.spec_from_file_location("plugin", plugin_path)
-            if not spec or not spec.loader:
-                return False
+            if os.path.exists(plugin_path):
+                module_name = os.path.basename(plugin_path).replace(".py", "")
+                spec = importlib.util.spec_from_file_location(module_name, plugin_path)
+                if not spec or not spec.loader:
+                    return False
 
-            plugin = importlib.util.module_from_spec(spec)
-            sys.modules["plugin"] = plugin
-            spec.loader.exec_module(plugin)
-
-            if not hasattr(plugin, "check_content") or not callable(plugin.check_content):
-                return False
-
-            self.plugins.append(plugin)
-            return True
-        except Exception:
+                plugin_module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = plugin_module
+                spec.loader.exec_module(plugin_module)
+            else:
+                try:
+                    plugin_module = importlib.import_module(plugin_path)
+                except ImportError:
+                    return False
+                
+            if hasattr(plugin_module, "check_content") and callable(plugin_module.check_content):
+                self.plugins.append(plugin_module)
+                
+            plugin_classes = self._find_plugin_classes(plugin_module)
+            if plugin_classes:
+                for plugin_class in plugin_classes:
+                    plugin_instance = plugin_class()
+                    if plugin_instance.initialize():
+                        self.plugin_instances.append(plugin_instance)
+                        
+                        # reg any rules from the plugin
+                        rules = plugin_instance.register_rules()
+                        if rules:
+                            for rule in rules:
+                                self.add_rule(
+                                    rule["name"], 
+                                    rule["pattern"], 
+                                    rule["description"],
+                                    rule.get("severity", "medium")
+                                )
+            
+            # handle the legacy register_rules function
+            if hasattr(plugin_module, "register_rules") and callable(plugin_module.register_rules):
+                rules = plugin_module.register_rules()
+                if rules:
+                    for rule in rules:
+                        self.add_rule(
+                            rule["name"], 
+                            rule["pattern"], 
+                            rule["description"],
+                            rule.get("severity", "medium")
+                        )
+                        
+            return bool(self.plugins) or bool(self.plugin_instances)
+        except Exception as e:
+            print(f"Error loading plugin: {e}")
             return False
+
+    def _find_plugin_classes(self, module) -> List[Type[PluginBase]]:
+        """Find all plugin classes in a module."""
+        plugin_classes = []
+        for name, obj in inspect.getmembers(module):
+            if (inspect.isclass(obj) and 
+                issubclass(obj, PluginBase) and 
+                obj is not PluginBase):
+                plugin_classes.append(obj)
+        return plugin_classes
+
+    def unload_all_plugins(self) -> None:
+        """Unload all plugins and clean up resources."""
+        for plugin_instance in self.plugin_instances:
+            try:
+                plugin_instance.cleanup()
+            except Exception:
+                pass
+        self.plugins = []
+        self.plugin_instances = []
+    
+    def unload_plugin(self, plugin_name: str) -> bool:
+        """Unload a specific plugin by name."""
+        for i, plugin_instance in enumerate(self.plugin_instances):
+            if plugin_instance.name == plugin_name:
+                try:
+                    plugin_instance.cleanup()
+                    self.plugin_instances.pop(i)
+                    return True
+                except Exception:
+                    return False
+        return False
 
     def check_file(self, file_path: str) -> List[Dict[str, Any]]:
         try:
@@ -263,3 +346,47 @@ class RuleEngine:
             return results
         except Exception:
             return []
+
+    def get_loaded_plugins(self) -> List[Any]:
+        """Get all currently loaded plugins."""
+        return self.plugins + self.plugin_instances
+    
+    def get_plugin_info(self) -> List[Dict[str, Any]]:
+        """Get detailed information about all loaded plugins."""
+        plugin_info = []
+        
+        for plugin in self.plugins:
+            info = {
+                "name": getattr(plugin, "__name__", "Unknown"),
+                "type": "function",
+                "has_check_content": hasattr(plugin, "check_content") and callable(plugin.check_content),
+                "has_register_rules": hasattr(plugin, "register_rules") and callable(plugin.register_rules),
+                "rules_count": len(plugin.register_rules()) if hasattr(plugin, "register_rules") and callable(plugin.register_rules) else 0,
+                "path": getattr(plugin, "__file__", "Unknown")
+            }
+            plugin_info.append(info)
+        
+        for plugin in self.plugin_instances:
+            info = {
+                "name": plugin.name,
+                "type": "class",
+                "has_check_content": True, 
+                "has_register_rules": True, 
+                "rules_count": len(plugin.register_rules()),
+                "path": getattr(plugin.__class__.__module__, "__file__", "Unknown")
+            }
+            plugin_info.append(info)
+            
+        return plugin_info
+    
+    def has_plugin(self, name: str) -> bool:
+        """Check if a plugin with the given name is loaded."""
+        for plugin in self.plugin_instances:
+            if plugin.name == name:
+                return True
+                
+        for plugin in self.plugins:
+            if getattr(plugin, "__name__", "") == name:
+                return True
+                
+        return False

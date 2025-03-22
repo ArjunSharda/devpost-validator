@@ -842,6 +842,86 @@ def load_plugin(
     except Exception as e:
         error_console.print(f"[red]Error loading plugin: {str(e)}[/red]")
 
+@plugin_app.command("list", help="List all loaded plugins")
+def list_plugins():
+    validator = DevPostValidator()
+    plugins = validator.rule_engine.get_loaded_plugins()
+    
+    if not plugins:
+        console.print("[yellow]No plugins currently loaded[/yellow]")
+        return
+    
+    table = Table(title="Loaded Plugins")
+    table.add_column("Name", style="cyan")
+    table.add_column("Type", style="green")
+    table.add_column("Rules Provided", style="blue")
+    
+    for plugin in plugins:
+        if hasattr(plugin, "name"):
+            name = plugin.name
+            type_name = "Class-based"
+            rules_count = len(plugin.register_rules()) if hasattr(plugin, "register_rules") else 0
+        else:
+            name = plugin.__name__ if hasattr(plugin, "__name__") else "Unknown"
+            type_name = "Function-based"
+            rules_count = len(plugin.register_rules()) if hasattr(plugin, "register_rules") else 0
+        
+        table.add_row(name, type_name, str(rules_count))
+    
+    console.print(table)
+
+@plugin_app.command("unload", help="Unload a specific plugin")
+def unload_plugin(
+        plugin_name: str = typer.Argument(..., help="Name of the plugin to unload")
+):
+    validator = DevPostValidator()
+    success = validator.rule_engine.unload_plugin(plugin_name)
+    
+    if success:
+        console.print(f"[green]Plugin '{plugin_name}' successfully unloaded[/green]")
+    else:
+        error_console.print(f"[red]Failed to unload plugin '{plugin_name}'. Plugin not found or error occurred.[/red]")
+
+@plugin_app.command("unload-all", help="Unload all plugins")
+def unload_all_plugins():
+    validator = DevPostValidator()
+    validator.rule_engine.unload_all_plugins()
+    console.print("[green]All plugins have been unloaded[/green]")
+
+@plugin_app.command("create", help="Create a new plugin template")
+def create_plugin(
+        output_path: str = typer.Argument(..., help="Path to save the new plugin"),
+        plugin_name: str = typer.Option("CustomPlugin", "--name", "-n", help="Name for the plugin class"),
+        plugin_type: str = typer.Option("class", "--type", "-t", help="Plugin type: 'class' or 'function'")
+):
+    from devpost_validator.plugin_utils import create_plugin_template
+    
+    try:
+        output_file = Path(output_path)
+        if output_file.exists():
+            overwrite = typer.confirm(f"File {output_file} already exists. Overwrite?")
+            if not overwrite:
+                console.print("[yellow]Plugin creation aborted[/yellow]")
+                return
+        
+        if plugin_type.lower() not in ["class", "function"]:
+            error_console.print("[red]Invalid plugin type. Must be 'class' or 'function'[/red]")
+            return
+            
+        success = create_plugin_template(
+            output_path=output_path,
+            plugin_name=plugin_name,
+            plugin_type=plugin_type.lower()
+        )
+        
+        if success:
+            console.print(f"[green]Plugin template created at: {output_file}[/green]")
+            console.print("Edit the template to add your custom validation logic")
+        else:
+            error_console.print("[red]Failed to create plugin template[/red]")
+    except Exception as e:
+        error_console.print(f"[red]Error creating plugin template: {str(e)}[/red]")
+
 
 @batch_app.command("validate", help="Batch validate multiple projects")
 def batch_validate(

@@ -99,25 +99,83 @@ else:
 
 ## Plugin System
 
-Create custom plugins to extend validation capabilities:
+DevPost Validator supports a flexible plugin system that allows you to extend its validation capabilities in two ways:
+
+### 1. Simple Function-Based Plugins (Legacy)
 
 ```python
-# myplugin.py
+# simple_plugin.py
 def register_rules():
     return [
         {
             "name": "custom_pattern",
             "pattern": r"specific pattern to detect",
-            "description": "Description of what this pattern detects"
+            "description": "Description of what this pattern detects",
+            "severity": "medium"  # optional, defaults to "medium"
         }
     ]
+
+# Optional: Add custom content validation logic
+def check_content(content: str):
+    results = []
+    # Custom validation logic
+    return results
 ```
 
-Load the plugin:
+### 2. Class-Based Plugins (Recommended)
+
+For more complex plugins, we recommend that you use the class-based approach:
+
+```python
+# advanced_plugin.py
+from devpost_validator.plugin_base import PluginBase
+
+class MyCustomPlugin(PluginBase):
+    def __init__(self):
+        super().__init__("MyPlugin")  # Name is optional
+    
+    def initialize(self) -> bool:
+        # Setup code here
+        return True
+        
+    def register_rules(self):
+        return [
+            {
+                "name": "advanced_pattern",
+                "pattern": r"pattern to detect",
+                "description": "What this pattern checks for",
+                "severity": "high"
+            }
+        ]
+    
+    def check_content(self, content: str):
+        results = []
+        # Your custom validation logic here
+        return results
+        
+    def cleanup(self):
+        # Release resources when plugin is unloaded
+        pass
+```
+
+### Loading Plugins
+
+Load a plugin using the command line:
 
 ```bash
-devpost-validator load-plugin myplugin.py
+devpost-validator load-plugin /path/to/your/plugin.py
 ```
+
+Or programmatically:
+
+```python
+from devpost_validator import RuleEngine
+
+engine = RuleEngine()
+engine.load_plugin("/path/to/your/plugin.py")
+```
+
+See the `/examples` directory for complete plugin examples.
 
 ## License
 

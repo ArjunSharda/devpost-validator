@@ -1,23 +1,32 @@
+from typing import Dict, List, Any, Optional, Tuple
 import re
 import requests
-from typing import Dict, List, Optional, Tuple, Any
 from bs4 import BeautifulSoup
-import hashlib
-from urllib.parse import urlparse
-from datetime import datetime, timezone
+import time
+import random
+from pathlib import Path
 import json
+import urllib.parse
 
 
 class DevPostAnalyzer:
     def __init__(self):
-        self.cache = {}
         self.headers = {
-            "User-Agent": "DevPostValidator/2.0.0"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Cache-Control": "max-age=0"
         }
-        self.api_endpoint = "https://devpost.com/api/v1/hackathons"
-        self.submission_data = {}
+        self.cache_dir = Path.home() / ".devpost-validator" / "cache" / "devpost"
+        self.cache_dir.mkdir(exist_ok=True, parents=True)
 
     def analyze_submission(self, devpost_url: str) -> Dict[str, Any]:
+        cached_data = self._check_cache(devpost_url)
+        if cached_data:
+            return cached_data
+
         result = {
             "url": devpost_url,
             "title": "",
@@ -25,178 +34,266 @@ class DevPostAnalyzer:
             "team_members": [],
             "technologies": [],
             "github_url": None,
-            "ai_content_probability": 0.0,
-            "duplicate_submission": False,
             "hackathon": "",
-            "submission_date": None,
-            "warnings": []
+            "duplicate_submission": False,
+            "ai_content_probability": 0.0,
+            "mentions_ai_tools": False,
+            "has_demo_link": False,
+            "has_video_demo": False,
+            "image_count": 0,
+            "submission_time": "",
+            "error": None
         }
 
         try:
-            content = self._fetch_devpost_content(devpost_url)
-            if not content:
-                result["warnings"].append("Failed to fetch DevPost content")
+            time.sleep(random.uniform(0.5, 1.5))
+            response = requests.get(devpost_url, headers=self.headers, timeout=15)
+
+            if response.status_code != 200:
+                result["error"] = f"HTTP error {response.status_code}"
                 return result
-
-            result.update(content)
-
-            result["ai_content_probability"] = self._detect_ai_probability(result.get("description", ""))
-            result["duplicate_submission"] = self._check_duplicate_submission(result.get("title", ""),
-                                                                              result.get("description", ""))
-
-            return result
-
-        except Exception as e:
-            result["warnings"].append(f"Error analyzing DevPost: {str(e)}")
-            return result
-
-    def _fetch_devpost_content(self, url: str) -> Optional[Dict]:
-        try:
-            if url in self.cache:
-                return self.cache[url]
-
-            response = requests.get(url, headers=self.headers, timeout=10)
-            response.raise_for_status()
 
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            title = soup.find('h1')
-            title = title.text.strip() if title else "Unknown Project"
+            title_elem = soup.find('h1')
+            if title_elem:
+                result["title"] = title_elem.get_text().strip()
 
-            description_divs = soup.select('.app-details .description')
-            description = description_divs[0].text.strip() if description_divs else ""
+            description_elem = soup.select_one('div.app-details-inner')
+            if description_elem:
+                description = description_elem.get_text().strip()
+                result["description"] = description
 
-            team_members = []
-            team_section = soup.select('.app-team .members li')
-            for member in team_section:
-                member_name = member.select_one('.member-name')
-                if member_name:
-                    team_members.append(member_name.text.strip())
+                if description:
+                    ai_prob = self._estimate_ai_probability(description)
+                    result["ai_content_probability"] = ai_prob
 
-            technologies = []
-            tech_spans = soup.select('.app-details .software-used .cp-tag')
-            for tech in tech_spans:
-                technologies.append(tech.text.strip())
+                    ai_tools = ["chatgpt", "gpt", "claude", "gemini", "bard", "copilot", "generative ai", "ai assisted"]
+                    result["mentions_ai_tools"] = any(tool in description.lower() for tool in ai_tools)
 
-            github_link = None
-            repo_links = soup.select('a[href*="github.com"]')
-            if repo_links:
-                github_link = repo_links[0]['href']
+            team_elements = soup.select('li.software-team-member')
+            for member in team_elements:
+                name_elem = member.select_one('h4 a')
+                if name_elem:
+                    result["team_members"].append(name_elem.get_text().strip())
 
-            hackathon_link = soup.select_one('.software-header-hackathon a')
-            hackathon = hackathon_link.text.strip() if hackathon_link else ""
+            tech_tags = soup.select('span.cp-tag')
+            for tag in tech_tags:
+                text = tag.get_text().strip()
+                if text and text != "+":
+                    result["technologies"].append(text)
 
-            date_span = soup.select_one('span.date')
-            submission_date = None
-            if date_span:
-                date_text = date_span.text.strip()
-                try:
-                    submission_date = datetime.strptime(date_text, "%b %d, %Y").replace(tzinfo=timezone.utc)
-                except:
-                    pass
+            github_link = soup.select_one('a[href*="github.com"]')
+            if github_link:
+                result["github_url"] = github_link['href']
 
-            result = {
-                "title": title,
-                "description": description,
-                "team_members": team_members,
-                "technologies": technologies,
-                "github_url": github_link,
-                "hackathon": hackathon,
-                "submission_date": submission_date
-            }
+            hackathon_elem = soup.select_one('div.software-list-content h5 a')
+            if hackathon_elem:
+                result["hackathon"] = hackathon_elem.get_text().strip()
 
-            self.cache[url] = result
-            self.submission_data[title] = {
-                "url": url,
-                "description": description,
-                "team_members": team_members,
-                "technologies": technologies,
-                "submission_date": submission_date,
-                "hackathon": hackathon
-            }
+            youtube_links = soup.select('a[href*="youtube.com"], a[href*="youtu.be"], iframe[src*="youtube.com"]')
+            vimeo_links = soup.select('a[href*="vimeo.com"], iframe[src*="vimeo.com"]')
+            result["has_video_demo"] = len(youtube_links) > 0 or len(vimeo_links) > 0
 
+            demo_links = soup.select(
+                'a[href*="demo"], a[href*="live-"], a[href*="demo."], a[href*="heroku"], a[href*="netlify"], a[href*="vercel"]')
+            result["has_demo_link"] = len(demo_links) > 0
+
+            images = soup.select('div.app-details img, div.gallery-item img')
+            result["image_count"] = len(images)
+
+            time_elem = soup.select_one('time')
+            if time_elem and time_elem.has_attr('datetime'):
+                result["submission_time"] = time_elem['datetime']
+
+            duplicate_elems = soup.select('div.software-list-content')
+            if len(duplicate_elems) > 1:
+                result["duplicate_submission"] = True
+
+            self._cache_result(devpost_url, result)
             return result
 
         except Exception as e:
-            return None
-
-    def _detect_ai_probability(self, text: str) -> float:
-        if not text or len(text) < 100:
-            return 0.0
-
-        ai_markers = [
-            (r"As an AI language model", 0.9),
-            (r"I'm sorry, (but )?I (cannot|can't)", 0.8),
-            (r"I don't have (personal )?opinions", 0.8),
-            (r"As of my last (knowledge|training) ?(update)? ?(in|on)? ?(the)? ?\d{4}", 0.9),
-            (r"As a(n)? (language |text )?AI( model)?", 0.9),
-            (r"I don't have the ability to", 0.7),
-            (r"without access to (real-time|current|up-to-date)", 0.7),
-            (
-            r"\b(first|firstly|second|secondly|third|thirdly|fourth|lastly)\b.{1,50}\b(first|firstly|second|secondly|third|thirdly|fourth|lastly)\b",
-            0.4),
-            (r"In conclusion,", 0.3),
-            (r"Let me know if you have any (other |more )?questions", 0.6),
-            (r"I hope this helps", 0.5),
-        ]
-
-        max_prob = 0.0
-        for pattern, prob in ai_markers:
-            if re.search(pattern, text, re.IGNORECASE):
-                max_prob = max(max_prob, prob)
-
-        paragraphs = text.split('\n\n')
-
-        if len(paragraphs) >= 3:
-            similar_starts = 0
-            even_lengths = 0
-            prev_length = len(paragraphs[0].split())
-
-            for i in range(1, len(paragraphs)):
-                if not paragraphs[i]:
-                    continue
-
-                curr_length = len(paragraphs[i].split())
-                length_diff = abs(curr_length - prev_length)
-
-                if length_diff <= 3:
-                    even_lengths += 1
-
-                prev_length = curr_length
-
-                if paragraphs[i] and paragraphs[i - 1]:
-                    first_words_prev = paragraphs[i - 1].split(' ')[:3]
-                    first_words_curr = paragraphs[i].split(' ')[:3]
-                    if any(word.lower() in [w.lower() for w in first_words_curr] for word in first_words_prev):
-                        similar_starts += 1
-
-            if similar_starts >= 2:
-                max_prob = max(max_prob, 0.5)
-
-            if even_lengths >= len(paragraphs) * 0.7:
-                max_prob = max(max_prob, 0.4)
-
-        return max_prob
-
-    def _check_duplicate_submission(self, title: str, description: str) -> bool:
-        title_hash = hashlib.md5(title.lower().encode('utf-8')).hexdigest()
-        desc_hash = hashlib.md5(description[:300].lower().encode('utf-8')).hexdigest()
-
-        for project, data in self.submission_data.items():
-            if project != title:
-                other_title_hash = hashlib.md5(project.lower().encode('utf-8')).hexdigest()
-                other_desc_hash = hashlib.md5(data.get("description", "")[:300].lower().encode('utf-8')).hexdigest()
-
-                title_match = title_hash == other_title_hash
-                desc_match = desc_hash == other_desc_hash
-
-                if title_match or desc_match:
-                    return True
-
-        return False
+            result["error"] = str(e)
+            return result
 
     def extract_github_url(self, devpost_url: str) -> Optional[str]:
-        content = self._fetch_devpost_content(devpost_url)
-        if content and "github_url" in content:
-            return content["github_url"]
+        cached_data = self._check_cache(devpost_url)
+        if cached_data and cached_data.get("github_url"):
+            return cached_data.get("github_url")
+
+        try:
+            time.sleep(random.uniform(0.5, 1.0))
+            response = requests.get(devpost_url, headers=self.headers, timeout=10)
+
+            if response.status_code != 200:
+                return None
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            github_link = soup.select_one('a[href*="github.com"]')
+
+            if github_link and 'href' in github_link.attrs:
+                github_url = github_link['href']
+
+                if not github_url.startswith(('http://', 'https://')):
+                    github_url = f"https://{github_url}"
+
+                return github_url
+
+            return None
+
+        except Exception:
+            return None
+
+    def _estimate_ai_probability(self, text: str) -> float:
+        if not text:
+            return 0.0
+
+        ai_indicators = [
+            (
+            r"\b(as an ai|as a language model|i'm an ai|my training|my knowledge cutoff|my training data|my last update)\b",
+            0.9),
+            (
+            r"\b(i don't have (personal|subjective|real-time|current) (opinions|feelings|thoughts|information|data|access))\b",
+            0.8),
+            (r"(here's|here is) (a|an) (step-by-step|comprehensive|detailed) (guide|explanation|breakdown|analysis)",
+             0.5),
+            (
+            r"(there are|we have) (several|many|various|numerous|multiple) (options|approaches|methods|techniques|ways|strategies)",
+            0.4),
+            (r"(firstly|secondly|thirdly|lastly|finally|to begin with|next|first of all|in conclusion)", 0.3),
+            (r"\b(it's (important|worth|crucial) to (note|mention|understand|know|remember))\b", 0.4),
+            (r"\b(key (features|advantages|benefits|points|aspects|components))\b", 0.3),
+            (r"\b(based on (your|the) (requirements|needs|specifications|description|input))\b", 0.5),
+            (r"\b(hope this (helps|is helpful|meets your needs|addresses your question))\b", 0.7),
+            (r"\b(feel free to (modify|adjust|adapt|customize|tweak))\b", 0.7),
+            (
+            r"\b(let me know if you (have|need|want) (any|more|further) (questions|clarification|information|help|assistance))\b",
+            0.8)
+        ]
+
+        text_lower = text.lower()
+
+        indicators_found = []
+        for pattern, weight in ai_indicators:
+            matches = re.findall(pattern, text_lower, re.IGNORECASE)
+            if matches:
+                indicators_found.append((pattern, weight, len(matches)))
+
+        if not indicators_found:
+            return 0.0
+
+        total_weight = sum(weight * min(count, 3) for _, weight, count in indicators_found)
+        normalized_weight = min(0.95, total_weight / 5)
+
+        paragraph_count = len(re.split(r'\n\s*\n', text))
+        sentence_count = len(re.split(r'[.!?]+', text))
+        avg_paragraph_length = len(text) / paragraph_count if paragraph_count > 0 else 0
+
+        if avg_paragraph_length > 500 and paragraph_count > 3:
+            normalized_weight = min(0.95, normalized_weight + 0.1)
+
+        return normalized_weight
+
+    def _check_cache(self, url: str) -> Optional[Dict[str, Any]]:
+        cache_key = urllib.parse.quote_plus(url)
+        cache_file = self.cache_dir / f"{cache_key}.json"
+
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'r') as f:
+                    cached_data = json.load(f)
+
+                cache_time = cached_data.get("_cache_time", 0)
+                current_time = time.time()
+
+                if current_time - cache_time < 86400:
+                    return cached_data
+            except Exception:
+                pass
+
         return None
+
+    def _cache_result(self, url: str, result: Dict[str, Any]) -> None:
+        try:
+            cache_key = urllib.parse.quote_plus(url)
+            cache_file = self.cache_dir / f"{cache_key}.json"
+
+            result["_cache_time"] = time.time()
+
+            with open(cache_file, 'w') as f:
+                json.dump(result, f, indent=2)
+        except Exception:
+            pass
+
+    def compare_submissions(self, url1: str, url2: str) -> Dict[str, Any]:
+        result1 = self.analyze_submission(url1)
+        result2 = self.analyze_submission(url2)
+
+        similarity = {
+            "title_match": self._calculate_text_similarity(result1.get("title", ""), result2.get("title", "")),
+            "description_match": self._calculate_text_similarity(result1.get("description", ""),
+                                                                 result2.get("description", "")),
+            "team_overlap": self._calculate_list_overlap(result1.get("team_members", []),
+                                                         result2.get("team_members", [])),
+            "technology_overlap": self._calculate_list_overlap(result1.get("technologies", []),
+                                                               result2.get("technologies", [])),
+            "github_match": result1.get("github_url") == result2.get("github_url") and result1.get(
+                "github_url") is not None,
+            "overall_similarity": 0.0
+        }
+
+        weights = {
+            "title_match": 0.1,
+            "description_match": 0.4,
+            "team_overlap": 0.2,
+            "technology_overlap": 0.1,
+            "github_match": 0.2
+        }
+
+        similarity["overall_similarity"] = sum(
+            similarity[key] * weights[key]
+            for key in weights
+            if key in similarity
+        )
+
+        return similarity
+
+    def _calculate_text_similarity(self, text1: str, text2: str) -> float:
+        if not text1 or not text2:
+            return 0.0
+
+        if text1 == text2:
+            return 1.0
+
+        tokens1 = set(self._tokenize(text1))
+        tokens2 = set(self._tokenize(text2))
+
+        intersection = tokens1.intersection(tokens2)
+        union = tokens1.union(tokens2)
+
+        if not union:
+            return 0.0
+
+        return len(intersection) / len(union)
+
+    def _calculate_list_overlap(self, list1: List[str], list2: List[str]) -> float:
+        if not list1 or not list2:
+            return 0.0
+
+        set1 = set(item.lower() for item in list1)
+        set2 = set(item.lower() for item in list2)
+
+        intersection = set1.intersection(set2)
+        union = set1.union(set2)
+
+        if not union:
+            return 0.0
+
+        return len(intersection) / len(union)
+
+    def _tokenize(self, text: str) -> List[str]:
+        text = text.lower()
+        text = re.sub(r'[^\w\s]', '', text)
+        tokens = text.split()
+        return [token for token in tokens if len(token) > 2]

@@ -1,232 +1,309 @@
+from typing import Dict, List, Any, Optional, Tuple, Set
 import re
 import requests
-from typing import Dict, List, Optional, Tuple, Any, Set
-from bs4 import BeautifulSoup
 import hashlib
-from difflib import SequenceMatcher
+from urllib.parse import urlparse, parse_qs
+from pathlib import Path
 import json
+import os
+import time
 
 
 class PlagiarismChecker:
     def __init__(self):
-        self.cache = {}
+        self.cache_dir = Path.home() / ".devpost-validator" / "cache" / "plagiarism"
+        self.cache_dir.mkdir(exist_ok=True, parents=True)
         self.headers = {
-            "User-Agent": "DevPostValidator/2.0.0"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         }
-        self.known_projects = {}
 
-    def check_devpost_project(self, devpost_url: str, team_size: Optional[int] = None,
-                              required_technologies: Optional[List[str]] = None) -> Dict:
+    def check_code_plagiarism(self, code_content: str, filename: str) -> Dict[str, Any]:
         result = {
-            "url": devpost_url,
-            "title": "",
-            "description": "",
-            "similarity_matches": [],
-            "ai_content_probability": 0.0,
-            "team_members": [],
-            "technologies": [],
-            "team_compliance": {
-                "size_compliant": True,
-                "technologies_compliant": True
-            },
-            "warnings": []
+            "plagiarism_detected": False,
+            "similarity_score": 0.0,
+            "source_urls": [],
+            "file": filename,
+            "snippets": []
         }
 
-        try:
-            content = self._fetch_devpost_content(devpost_url)
-            if not content:
-                result["warnings"].append("Failed to fetch DevPost content")
-                return result
+        code_hash = hashlib.md5(code_content.encode()).hexdigest()
+        cache_file = self.cache_dir / f"code_{code_hash}.json"
 
-            result["title"] = content.get("title", "")
-            result["description"] = content.get("description", "")
-            result["team_members"] = content.get("team_members", [])
-            result["technologies"] = content.get("technologies", [])
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                pass
 
-            ai_indicators = self._detect_ai_text_patterns(result["description"])
-            if ai_indicators:
-                result["warnings"].extend(ai_indicators)
-                result["ai_content_probability"] = min(0.9, 0.3 * len(ai_indicators))
-
-            similarity_matches = self._check_text_similarity(result["description"])
-            if similarity_matches:
-                result["similarity_matches"] = similarity_matches
-                result["warnings"].append(f"Found {len(similarity_matches)} potential content matches")
-
-            if team_size is not None:
-                if len(result["team_members"]) > team_size:
-                    result["team_compliance"]["size_compliant"] = False
-                    result["warnings"].append(
-                        f"Team size ({len(result['team_members'])}) exceeds maximum allowed ({team_size})")
-
-            if required_technologies:
-                req_techs = set(required_technologies)
-                used_techs = set(result["technologies"])
-                missing_techs = req_techs - used_techs
-
-                if missing_techs:
-                    result["team_compliance"]["technologies_compliant"] = False
-                    result["warnings"].append(f"Missing required technologies: {', '.join(missing_techs)}")
-
-            project_fingerprint = f"{result['title']}|{result['description'][:300]}"
-            if project_fingerprint in self.known_projects:
-                prev_url = self.known_projects[project_fingerprint]
-                if prev_url != devpost_url:
-                    result["warnings"].append(f"Potential duplicate submission of: {prev_url}")
-            else:
-                self.known_projects[project_fingerprint] = devpost_url
-
-        except Exception as e:
-            result["warnings"].append(f"Error analyzing DevPost content: {str(e)}")
-
-        return result
-
-    def _fetch_devpost_content(self, url: str) -> Optional[Dict]:
-        try:
-            if url in self.cache:
-                return self.cache[url]
-
-            response = requests.get(url, headers=self.headers, timeout=10)
-            response.raise_for_status()
-
-            soup = BeautifulSoup(response.text, 'html.parser')
-
-            title = soup.find('h1')
-            title = title.text.strip() if title else "Unknown Project"
-
-            description_divs = soup.select('.app-details .description')
-            description = description_divs[0].text.strip() if description_divs else ""
-
-            team_members = []
-            team_section = soup.select('.app-team .members li')
-            for member in team_section:
-                member_name = member.select_one('.member-name')
-                if member_name:
-                    team_members.append(member_name.text.strip())
-
-            technologies = []
-            tech_spans = soup.select('.app-details .software-used .cp-tag')
-            for tech in tech_spans:
-                technologies.append(tech.text.strip())
-
-            github_link = None
-            repo_links = soup.select('a[href*="github.com"]')
-            if repo_links:
-                github_link = repo_links[0]['href']
-
-            result = {
-                "title": title,
-                "description": description,
-                "team_members": team_members,
-                "technologies": technologies,
-                "github_url": github_link
-            }
-
-            self.cache[url] = result
+        suspicious_snippets = self._extract_suspicious_snippets(code_content)
+        if not suspicious_snippets:
+            self._cache_result(cache_file, result)
             return result
 
-        except Exception:
-            return None
+        for snippet in suspicious_snippets[:3]:
+            snippet_result = self._check_snippet_plagiarism(snippet, filename)
+            if snippet_result["plagiarism_detected"]:
+                result["plagiarism_detected"] = True
+                result["snippets"].append({
+                    "content": snippet,
+                    "similarity": snippet_result["similarity_score"],
+                    "sources": snippet_result["source_urls"]
+                })
+                result["source_urls"].extend(snippet_result["source_urls"])
 
-    def _detect_ai_text_patterns(self, text: str) -> List[str]:
-        warnings = []
+        if result["plagiarism_detected"]:
+            result["source_urls"] = list(set(result["source_urls"]))
+            result["similarity_score"] = max(s["similarity"] for s in result["snippets"]) if result["snippets"] else 0.0
 
-        patterns = [
-            (r"As an AI language model", "Contains phrase 'As an AI language model'"),
-            (r"I'm sorry, (but )?I (cannot|can't)", "Contains common AI refusal pattern"),
-            (r"I don't have (personal )?opinions", "Contains common AI disclaimer"),
-            (r"As of my last (knowledge|training) ?(update)? ?(in|on)? ?(the)? ?\d{4}",
-             "Contains reference to training cutoff"),
-            (r"As a(n)? (language |text )?AI( model)?", "Contains self-reference as AI model"),
-            (r"I don't have the ability to", "Contains common AI limitation statement"),
-            (r"without access to (real-time|current|up-to-date)", "Contains common AI knowledge limitation"),
-            (
-            r"\b(first|firstly|second|secondly|third|thirdly|fourth|lastly)\b.{1,50}\b(first|firstly|second|secondly|third|thirdly|fourth|lastly)\b",
-            "Contains mechanical enumeration common in AI text"),
-            (r"In conclusion,", "Contains 'In conclusion' common in AI-structured text"),
-            (r"Let me know if you have any (other |more )?questions", "Contains AI service phrase"),
-            (r"I hope this helps", "Contains AI closing statement"),
-        ]
+        self._cache_result(cache_file, result)
+        return result
 
-        for pattern, warning in patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                warnings.append(warning)
+    def check_repo_plagiarism(self, repo_path: str) -> Dict[str, Any]:
+        result = {
+            "overall_plagiarism_score": 0.0,
+            "files_checked": 0,
+            "plagiarism_detected": False,
+            "plagiarized_files": [],
+            "source_urls": []
+        }
 
-        paragraphs = text.split('\n\n')
-        if len(paragraphs) >= 3:
-            similar_starts = 0
-            even_lengths = 0
-            prev_length = len(paragraphs[0].split())
+        for root, _, files in os.walk(repo_path):
+            if any(excluded in root for excluded in
+                   ['.git', 'node_modules', '__pycache__', 'venv', 'env', 'dist', 'build']):
+                continue
 
-            for i in range(1, len(paragraphs)):
-                if not paragraphs[i]:
+            for file in files:
+                if file.startswith('.') or not self._is_text_file(file):
                     continue
 
-                curr_length = len(paragraphs[i].split())
-                length_diff = abs(curr_length - prev_length)
+                file_path = os.path.join(root, file)
+                rel_path = os.path.relpath(file_path, repo_path)
 
-                if length_diff <= 3:
-                    even_lengths += 1
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
 
-                prev_length = curr_length
+                    if len(content) < 50:
+                        continue
 
-                if paragraphs[i] and paragraphs[i - 1]:
-                    first_words_prev = paragraphs[i - 1].split(' ')[:3]
-                    first_words_curr = paragraphs[i].split(' ')[:3]
-                    if any(word.lower() in [w.lower() for w in first_words_curr] for word in first_words_prev):
-                        similar_starts += 1
+                    result["files_checked"] += 1
 
-            if similar_starts >= 2:
-                warnings.append("Multiple paragraphs begin with similar phrases (common in AI text)")
+                    file_result = self.check_code_plagiarism(content, rel_path)
 
-            if even_lengths >= len(paragraphs) * 0.7:
-                warnings.append("Paragraphs have suspiciously similar lengths (common in AI text)")
-
-        return warnings
-
-    def _check_text_similarity(self, text: str) -> List[Dict]:
-        result = []
-
-        fingerprint = hashlib.md5(text[:300].encode('utf-8')).hexdigest()
-
-        for url, cached_content in self.cache.items():
-            if cached_content.get("description") and cached_content.get("description") != text:
-                cached_fingerprint = hashlib.md5(cached_content["description"][:300].encode('utf-8')).hexdigest()
-
-                if fingerprint == cached_fingerprint:
-                    result.append({
-                        "url": url,
-                        "title": cached_content.get("title", ""),
-                        "similarity": 1.0,
-                        "type": "exact_match"
-                    })
-                else:
-                    similarity = self.similarity_ratio(text[:1000], cached_content["description"][:1000])
-                    if similarity > 0.7:
-                        result.append({
-                            "url": url,
-                            "title": cached_content.get("title", ""),
-                            "similarity": similarity,
-                            "type": "similar_content"
+                    if file_result["plagiarism_detected"]:
+                        result["plagiarism_detected"] = True
+                        result["plagiarized_files"].append({
+                            "file": rel_path,
+                            "similarity": file_result["similarity_score"],
+                            "sources": file_result["source_urls"]
                         })
+                        result["source_urls"].extend(file_result["source_urls"])
+
+                except Exception:
+                    continue
+
+        if result["plagiarized_files"]:
+            result["source_urls"] = list(set(result["source_urls"]))
+            total_similarity = sum(f["similarity"] for f in result["plagiarized_files"])
+            result["overall_plagiarism_score"] = total_similarity / len(result["plagiarized_files"]) if result[
+                "plagiarized_files"] else 0.0
 
         return result
 
-    def similarity_ratio(self, a: str, b: str) -> float:
-        return SequenceMatcher(None, a, b).ratio()
+    def check_devpost_project(self, devpost_url: str, team_size: Optional[int] = None,
+                              required_technologies: Optional[List[str]] = None) -> Dict[str, Any]:
+        from devpost_validator.devpost_analyzer import DevPostAnalyzer
 
-    def load_known_projects(self, filepath: str) -> bool:
-        try:
-            with open(filepath, 'r') as f:
-                self.known_projects = json.load(f)
-            return True
-        except Exception:
+        result = {
+            "plagiarism_detected": False,
+            "similarity_score": 0.0,
+            "similar_projects": [],
+            "team_compliance": {
+                "size_compliant": True,
+                "actual_size": 0
+            },
+            "technology_compliance": {
+                "missing_required": [],
+                "compliance_score": 1.0
+            }
+        }
+
+        analyzer = DevPostAnalyzer()
+        project_data = analyzer.analyze_submission(devpost_url)
+
+        if project_data.get("error"):
+            result["error"] = project_data["error"]
+            return result
+
+        if team_size is not None:
+            team_members = project_data.get("team_members", [])
+            result["team_compliance"]["actual_size"] = len(team_members)
+            result["team_compliance"]["size_compliant"] = len(team_members) <= team_size
+
+        if required_technologies:
+            project_techs = set(t.lower() for t in project_data.get("technologies", []))
+            required_techs = set(t.lower() for t in required_technologies)
+
+            missing = required_techs - project_techs
+            result["technology_compliance"]["missing_required"] = list(missing)
+
+            if required_techs:
+                compliance_score = (len(required_techs) - len(missing)) / len(required_techs)
+                result["technology_compliance"]["compliance_score"] = compliance_score
+
+        if project_data.get("duplicate_submission", False):
+            result["plagiarism_detected"] = True
+            result["similar_projects"].append({
+                "url": devpost_url,
+                "similarity": 1.0,
+                "reason": "Self-duplicate submission to multiple hackathons"
+            })
+            result["similarity_score"] = 1.0
+
+        return result
+
+    def _extract_suspicious_snippets(self, code: str) -> List[str]:
+        snippets = []
+
+        lines = code.split('\n')
+        if len(lines) < 10:
+            return snippets
+
+        chunk_size = 25
+        step = 10
+
+        for i in range(0, len(lines), step):
+            if i + chunk_size <= len(lines):
+                chunk = '\n'.join(lines[i:i + chunk_size])
+                if len(chunk) > 100 and not self._is_common_code(chunk):
+                    snippets.append(chunk)
+
+        return snippets
+
+    def _check_snippet_plagiarism(self, snippet: str, filename: str) -> Dict[str, Any]:
+        result = {
+            "plagiarism_detected": False,
+            "similarity_score": 0.0,
+            "source_urls": []
+        }
+
+        if len(snippet) < 100:
+            return result
+
+        snippet_hash = hashlib.md5(snippet.encode()).hexdigest()
+        cache_file = self.cache_dir / f"snippet_{snippet_hash}.json"
+
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+
+        search_query = self._create_search_query(snippet, filename)
+        source_urls = self._search_code(search_query)
+
+        if source_urls:
+            result["plagiarism_detected"] = True
+            result["source_urls"] = source_urls
+            result["similarity_score"] = 0.8 if len(source_urls) > 1 else 0.6
+
+        self._cache_result(cache_file, result)
+        return result
+
+    def _create_search_query(self, snippet: str, filename: str) -> str:
+        lines = snippet.split('\n')
+
+        if not lines:
+            return ""
+
+        selected_lines = []
+        for line in lines:
+            line = line.strip()
+            if (len(line) > 20 and
+                    not line.startswith(('#', '//', '/*', '*', '"""', "'''")) and
+                    not re.match(r'^\s*[{}]\s*$', line) and
+                    not re.match(r'^\s*$', line)):
+                selected_lines.append(line)
+
+        if not selected_lines:
+            return ""
+
+        distinctive_lines = [line for line in selected_lines if self._is_distinctive(line)]
+        if distinctive_lines:
+            selected_lines = distinctive_lines[:3]
+        else:
+            selected_lines = selected_lines[:3]
+
+        query = ' '.join(selected_lines)
+        if len(query) > 150:
+            query = query[:150]
+
+        extension = Path(filename).suffix
+        if extension:
+            query += f" filetype:{extension.lstrip('.')}"
+
+        return query
+
+    def _search_code(self, query: str) -> List[str]:
+        if not query:
+            return []
+
+        time.sleep(2)
+        return []
+
+    def _is_distinctive(self, line: str) -> bool:
+        if len(line) < 20:
             return False
 
-    def save_known_projects(self, filepath: str) -> bool:
+        common_patterns = [
+            r'^\s*import\s+\w+',
+            r'^\s*from\s+\w+\s+import',
+            r'^\s*const\s+\w+\s*=',
+            r'^\s*let\s+\w+\s*=',
+            r'^\s*var\s+\w+\s*=',
+            r'^\s*public\s+class',
+            r'^\s*private\s+\w+\s+\w+\(',
+            r'^\s*def\s+\w+\(',
+            r'^\s*function\s+\w+\(',
+            r'^\s*return\s+',
+            r'^\s*if\s*\(',
+            r'^\s*for\s*\(',
+            r'^\s*while\s*\('
+        ]
+
+        return not any(re.match(pattern, line) for pattern in common_patterns)
+
+    def _is_common_code(self, chunk: str) -> bool:
+        common_chunks = [
+            "import React",
+            "import { useState, useEffect }",
+            "function App() {",
+            "export default",
+            "def __init__(self",
+            "if __name__ == '__main__'",
+            "public static void main(String[] args)",
+            "System.out.println",
+            "console.log",
+            "print(",
+            "useState("
+        ]
+
+        return any(common in chunk for common in common_chunks)
+
+    def _cache_result(self, cache_file: Path, result: Dict[str, Any]) -> None:
         try:
-            with open(filepath, 'w') as f:
-                json.dump(self.known_projects, f, indent=2)
-            return True
+            with open(cache_file, 'w') as f:
+                json.dump(result, f, indent=2)
         except Exception:
-            return False
+            pass
+
+    def _is_text_file(self, filename: str) -> bool:
+        text_extensions = {
+            '.py', '.js', '.jsx', '.ts', '.tsx', '.html', '.css', '.scss', '.java', '.c', '.cpp', '.h', '.hpp',
+            '.cs', '.php', '.rb', '.go', '.rs', '.swift', '.kt', '.sh', '.bat', '.txt', '.md', '.json', '.xml',
+            '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf'
+        }
+
+        return Path(filename).suffix.lower() in text_extensions

@@ -25,6 +25,7 @@ from devpost_validator.team_analyzer import TeamAnalyzer
 from devpost_validator.report_generator import ReportGenerator
 from devpost_validator.commit_analyzer import CommitAnalyzer
 from devpost_validator.technology_analyzer import TechnologyAnalyzer
+from devpost_validator.secret_analyzer import SecretAnalyzer
 
 
 class ValidationCategory(str, Enum):
@@ -71,6 +72,7 @@ class ValidationScore:
         self.complexity_score = 0.0
         self.technology_score = 0.0
         self.commit_quality_score = 0.0
+        self.secret_security_score = 1.0  # Default to 1.0 (perfect score)
         self.overall_score = 0.0
         self.category = ValidationCategory.FAILED
 
@@ -121,6 +123,7 @@ class ValidationScore:
             "complexity_score": self.complexity_score,
             "technology_score": self.technology_score,
             "commit_quality_score": self.commit_quality_score,
+            "secret_security_score": self.secret_security_score,
             "overall_score": self.overall_score,
             "category": self.category
         }
@@ -138,6 +141,7 @@ class ValidationResult:
         self.commit_analysis_results = {}
         self.technology_analysis_results = {}
         self.team_analysis_results = {}
+        self.secret_analysis_results = {}  # Add new field for secret analysis
         self.created_during_hackathon = False
         self.failures = []
         self.warnings = []
@@ -186,6 +190,7 @@ class ValidationResult:
             "commit_analysis_results": self.commit_analysis_results,
             "technology_analysis_results": self.technology_analysis_results,
             "team_analysis_results": self.team_analysis_results,
+            "secret_analysis_results": self.secret_analysis_results,  # Include secret analysis in export
             "created_during_hackathon": self.created_during_hackathon,
             "failures": [f.to_dict() for f in self.failures],
             "warnings": [w.to_dict() for w in self.warnings],
@@ -219,6 +224,7 @@ class DevPostValidator:
         self.report_generator = ReportGenerator()
         self.commit_analyzer = CommitAnalyzer()
         self.technology_analyzer = TechnologyAnalyzer()
+        self.secret_analyzer = SecretAnalyzer()  # Add secret analyzer
         self.current_config = None
         self.validation_history = []
 
@@ -240,11 +246,11 @@ class DevPostValidator:
 
     def load_hackathon_config(self, name: str) -> Optional[HackathonConfig]:
         config = self.config_manager.load_hackathon_config(name)
-        if config:
+        if (config):
             self.current_config = config
         return config
 
-    def validate_project(self, github_url: str, devpost_url: Optional[str] = None) -> ValidationResult:
+    def validate_project(self, github_url: str, devpost_url: Optional[str] = None, analyze_secrets: bool = False) -> ValidationResult:
         result = ValidationResult()
 
         if not self.github_analyzer:
@@ -347,6 +353,28 @@ class DevPostValidator:
             if features.analyze_commit_patterns:
                 repo_obj = git.Repo(temp_dir)
                 result.commit_analysis_results = self.commit_analyzer.analyze_commits(repo_obj, start_date, end_date)
+
+ 
+            if analyze_secrets and features.detect_security_issues:
+                secret_results = self.secret_analyzer.analyze_repo(temp_dir)
+                result.secret_analysis_results = secret_results
+ 
+                result.scores.secret_security_score = self.secret_analyzer.get_risk_score(secret_results)
+
+ 
+                if secret_results.get("secrets_found", False):
+                    result.add_warning(
+                        f"Found {secret_results['total_secrets']} potential secrets or sensitive data in the repository",
+                        ValidationPriority.HIGH if secret_results.get("critical_secrets", 0) > 0 else ValidationPriority.MEDIUM,
+                        {"secret_count": secret_results['total_secrets']}
+                    )
+
+                    if secret_results.get("critical_secrets", 0) > 0:
+                        result.add_failure(
+                            f"Found {secret_results['critical_secrets']} critical secrets that pose significant security risks",
+                            ValidationPriority.CRITICAL,
+                            {"critical_secrets": secret_results['critical_secrets']}
+                        )
 
         except Exception as e:
             result.add_failure(f"Error cloning or analyzing repository: {str(e)}", ValidationPriority.HIGH)
@@ -530,6 +558,26 @@ class DevPostValidator:
                     ValidationPriority.HIGH
                 )
 
+        if features.detect_security_issues and result.secret_analysis_results and result.secret_analysis_results.get("secrets_found", False):
+            critical_count = result.secret_analysis_results.get("critical_secrets", 0)
+            high_risk_count = result.secret_analysis_results.get("high_risk_secrets", 0)
+
+            if critical_count > 0:
+                result.add_failure(
+                    f"Critical security issue: {critical_count} critical severity secrets detected",
+                    ValidationPriority.CRITICAL
+                )
+            elif high_risk_count > 0:
+                result.add_warning(
+                    f"Security warning: {high_risk_count} high-risk secrets or sensitive files detected",
+                    ValidationPriority.HIGH
+                )
+            elif result.secret_analysis_results.get("total_secrets", 0) > 0:
+                result.add_warning(
+                    f"Found {result.secret_analysis_results.get('total_secrets', 0)} potential secrets or sensitive information",
+                    ValidationPriority.MEDIUM
+                )
+
     def _calculate_scores(self, result: ValidationResult, ai_score: float):
         github_results = result.github_results
 
@@ -635,6 +683,37 @@ class DevPostValidator:
             frequency_score = commits.get("frequency_score", 0.5)
             commit_quality_score = commit_quality_score * 0.8 + (frequency_score * 100.0) * 0.2
 
+ 
+        if hasattr(result, "secret_analysis_results") and result.secret_analysis_results:
+ 
+ 
+            result.scores.secret_security_score = result.scores.secret_security_score * 100
+            
+ 
+ 
+            if self.current_config and hasattr(self.current_config, "score_weights"):
+                weights = self.current_config.score_weights.copy()
+                
+ 
+ 
+                if "secret_security" not in weights:
+ 
+                    reduction_factor = 0.95  # Reduce other weights by 5%
+                    new_weights = {}
+                    
+                    for key, value in weights.items():
+                        new_weights[key] = value * reduction_factor
+                    
+ 
+                    new_weights["secret_security"] = 1.0 - sum(new_weights.values())
+                    weights = new_weights
+                
+ 
+                result.score_weights = weights
+        else:
+ 
+            result.scores.secret_security_score = 100.0
+
         result.scores.timeline_score = timeline_score
         result.scores.code_authenticity_score = code_authenticity_score
         result.scores.rule_compliance_score = rule_compliance_score
@@ -702,6 +781,7 @@ class DevPostValidator:
                 "complexity": f"{result.scores.complexity_score:.1f}%",
                 "technology": f"{result.scores.technology_score:.1f}%",
                 "commit_quality": f"{result.scores.commit_quality_score:.1f}%",
+                "secret_security": f"{result.scores.secret_security_score:.1f}%",
             },
             "timeline": {
                 "created_during_hackathon": result.created_during_hackathon,
@@ -747,6 +827,18 @@ class DevPostValidator:
             report["team_analysis"] = {
                 "contribution_balance": f"{result.team_analysis_results.get('contribution_balance', 0) * 100:.1f}%",
                 "github_team_match": f"{result.team_analysis_results.get('github_team_match', 0) * 100:.1f}%",
+            }
+
+ 
+        if hasattr(result, "secret_analysis_results") and result.secret_analysis_results:
+            report["secrets_analysis"] = {
+                "total_secrets": result.secret_analysis_results.get("total_secrets", 0),
+                "critical_secrets": result.secret_analysis_results.get("critical_secrets", 0),
+                "high_risk_secrets": result.secret_analysis_results.get("high_risk_secrets", 0),
+                "medium_risk_secrets": result.secret_analysis_results.get("medium_risk_secrets", 0),
+                "security_score": f"{result.scores.secret_security_score:.1f}%",
+                "findings": result.secret_analysis_results.get("findings", [])[:5],  # Show only top 5
+                "sensitive_files": result.secret_analysis_results.get("sensitive_files", [])[:5],  # Show only top 5
             }
 
         return report

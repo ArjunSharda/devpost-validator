@@ -512,6 +512,7 @@ def validate(
         verbose: bool = typer.Option(False, help="Show detailed results"),
         quiet: bool = typer.Option(False, help="Minimal output"),
         open_report: bool = typer.Option(False, help="Open report in browser when validation completes"),
+        secrets: bool = typer.Option(False, help="Analyze repository for secrets and sensitive data"),
         debug: bool = typer.Option(False, help="Show debug information")
 ):
     try:
@@ -555,7 +556,7 @@ def validate(
                 error_console.print("[red]Invalid GitHub URL format[/red]")
                 return
 
-            result = validator.validate_project(github_url, devpost_url)
+            result = validator.validate_project(github_url, devpost_url, analyze_secrets=secrets)
             progress.update(task, completed=100, description="Analysis complete!")
 
         if quiet:
@@ -731,6 +732,45 @@ def validate(
                         complexity_table.add_row("", f"Complexity: {complex_files[0].get('complexity', 0):.2f}")
 
                 console.print(complexity_table)
+
+ 
+            if secrets and hasattr(result, "secret_analysis_results") and result.secret_analysis_results:
+                console.print("\n[bold red]Security Analysis Results:[/bold red]")
+                
+                secret_results = result.secret_analysis_results
+                secret_table = Table(box=SIMPLE)
+                secret_table.add_column("Metric", style="blue")
+                secret_table.add_column("Value", style="red")
+                
+                secret_table.add_row("Total Secrets Found", str(secret_results.get("total_secrets", 0)))
+                secret_table.add_row("Critical Severity", str(secret_results.get("critical_secrets", 0)))
+                secret_table.add_row("High Severity", str(secret_results.get("high_risk_secrets", 0)))
+                secret_table.add_row("Medium Severity", str(secret_results.get("medium_risk_secrets", 0)))
+                secret_table.add_row("Security Score", f"{result.scores.secret_security_score * 100:.1f}%")
+                secret_table.add_row("Files Scanned", str(secret_results.get("files_scanned", 0)))
+                
+                console.print(secret_table)
+                
+                if result.secret_analysis_results.get("findings"):
+                    findings_table = Table(title="Secret Findings", box=SIMPLE)
+                    findings_table.add_column("File", style="blue")
+                    findings_table.add_column("Line", style="blue")
+                    findings_table.add_column("Type", style="yellow")
+                    findings_table.add_column("Risk", style="red")
+                    
+ 
+                    for finding in result.secret_analysis_results.get("findings", [])[:10]:
+                        findings_table.add_row(
+                            finding.get("file", ""),
+                            str(finding.get("line", "")),
+                            finding.get("type", ""),
+                            finding.get("risk", "")
+                        )
+                    
+                    console.print(findings_table)
+                    
+                    if len(result.secret_analysis_results.get("findings", [])) > 10:
+                        console.print(f"[yellow]... and {len(result.secret_analysis_results.get('findings', [])) - 10} more secret findings[/yellow]")
         else:
             if hasattr(result, "ai_detection_results") and result.ai_detection_results:
                 console.print(
@@ -739,6 +779,10 @@ def validate(
             if hasattr(result, "rule_violations") and result.rule_violations:
                 console.print(
                     f"\n[yellow]Rule Violations: {len(result.rule_violations)} found[/yellow] (Use --verbose to see details)")
+
+ 
+            if secrets and hasattr(result, "secret_analysis_results") and result.secret_analysis_results.get("total_secrets", 0) > 0:
+                console.print(f"\n[red]Security Issues: {result.secret_analysis_results.get('total_secrets', 0)} potential secrets found[/red] (Use --verbose to see details)")
 
         if output:
             output_path = Path(output)
@@ -1364,6 +1408,96 @@ def recreate_config(
     except Exception as e:
         error_console.print(f"[red]Error recreating configuration: {str(e)}[/red]")
 
+
+@config_app.command("wipe", help="Wipe configuration data")
+def wipe_config(
+    username: Optional[str] = typer.Option(None, "--username", "-u", help="GitHub username to wipe token for"),
+    configs: bool = typer.Option(False, "--configs", "-c", help="Wipe all hackathon configurations"),
+    config_name: Optional[str] = typer.Option(None, "--config", help="Wipe a specific configuration"),
+    cache: bool = typer.Option(False, "--cache", help="Wipe cached data"),
+    all_data: bool = typer.Option(False, "--all", help="Wipe all data (configs, cache, and GitHub token if username provided)"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompts")
+):
+    validator = DevPostValidator()
+    
+ 
+    if not any([username, configs, config_name, cache, all_data]):
+        error_console.print("[red]Error: You must specify what to wipe (--username, --configs, --config, --cache, or --all)[/red]")
+        return
+    
+    if config_name and configs:
+        error_console.print("[red]Error: You can't use both --config and --configs together[/red]")
+        return
+    
+ 
+    if not force:
+        operations = []
+        if username:
+            operations.append(f"GitHub token for user '{username}'")
+        if configs:
+            operations.append("all hackathon configurations")
+        if config_name:
+            operations.append(f"configuration '{config_name}'")
+        if cache:
+            operations.append("all cached data")
+        if all_data:
+            operations.append("ALL DATA (configurations, cache, and GitHub token if username provided)")
+        
+        operations_str = ", ".join(operations)
+        confirm = typer.confirm(f"Are you sure you want to wipe {operations_str}?")
+        if not confirm:
+            console.print("[yellow]Operation cancelled[/yellow]")
+            return
+    
+ 
+    results = {
+        "token_wiped": False,
+        "configs_wiped": 0,
+        "specific_config_wiped": False,
+        "cache_files_wiped": 0
+    }
+    
+    if username:
+        results["token_wiped"] = validator.config_manager.wipe_github_token(username)
+        if results["token_wiped"]:
+            console.print(f"[green]Successfully wiped GitHub token for user '{username}'[/green]")
+        else:
+            console.print(f"[yellow]No GitHub token found for user '{username}'[/yellow]")
+    
+    if configs:
+        count, names = validator.config_manager.wipe_all_configs()
+        results["configs_wiped"] = count
+        if count > 0:
+            console.print(f"[green]Successfully wiped {count} hackathon configurations: {', '.join(names)}[/green]")
+        else:
+            console.print("[yellow]No hackathon configurations found to wipe[/yellow]")
+    
+    if config_name:
+        results["specific_config_wiped"] = validator.config_manager.wipe_hackathon_config(config_name)
+        if results["specific_config_wiped"]:
+            console.print(f"[green]Successfully wiped configuration '{config_name}'[/green]")
+        else:
+            console.print(f"[yellow]Configuration '{config_name}' not found[/yellow]")
+    
+    if cache:
+        count, dirs = validator.config_manager.wipe_cache()
+        results["cache_files_wiped"] = count
+        if count > 0:
+            console.print(f"[green]Successfully wiped {count} cached files from {len(dirs)} directories[/green]")
+        else:
+            console.print("[yellow]No cache found to wipe[/yellow]")
+    
+    if all_data:
+        results = validator.config_manager.wipe_all_data(username)
+        console.print("[green]Successfully wiped all data:[/green]")
+        console.print(f"- {results['configs_deleted']} configurations wiped")
+        console.print(f"- {results['cache_files_deleted']} cached files deleted")
+        if username:
+            if results["token_deleted"]:
+                console.print(f"- GitHub token for '{username}' deleted")
+            else:
+                console.print(f"- No GitHub token found for '{username}'")
+        console.print("[green]All DevPost Validator data has been reset[/green]")
 
 if __name__ == "__main__":
     app()

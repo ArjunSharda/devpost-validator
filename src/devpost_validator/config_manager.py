@@ -4,7 +4,7 @@ import keyring
 from datetime import datetime, timezone
 from pathlib import Path
 from pydantic import BaseModel, Field, validator
-from typing import Optional, List, Dict, Set, Any
+from typing import Optional, List, Dict, Set, Any, Tuple  # Added Tuple to imports
 
 
 class ValidationThresholds(BaseModel):
@@ -164,46 +164,69 @@ class ConfigManager:
         if not config_path.exists():
             return None
 
-        with open(config_path, 'r') as f:
-            config_data = json.load(f)
+        try:
+            with open(config_path, 'r') as f:
+                config_data = json.load(f)
+                
+ 
+                required_keys = ["start_date", "end_date", "name"]
+                if not all(key in config_data for key in required_keys):
+                    return None
 
-            if isinstance(config_data["start_date"], str):
-                config_data["start_date"] = datetime.fromisoformat(config_data["start_date"])
-                if config_data["start_date"].tzinfo is None:
-                    config_data["start_date"] = config_data["start_date"].replace(tzinfo=timezone.utc)
+                if isinstance(config_data["start_date"], str):
+                    config_data["start_date"] = datetime.fromisoformat(config_data["start_date"])
+                    if config_data["start_date"].tzinfo is None:
+                        config_data["start_date"] = config_data["start_date"].replace(tzinfo=timezone.utc)
 
-            if isinstance(config_data["end_date"], str):
-                config_data["end_date"] = datetime.fromisoformat(config_data["end_date"])
-                if config_data["end_date"].tzinfo is None:
-                    config_data["end_date"] = config_data["end_date"].replace(tzinfo=timezone.utc)
+                if isinstance(config_data["end_date"], str):
+                    config_data["end_date"] = datetime.fromisoformat(config_data["end_date"])
+                    if config_data["end_date"].tzinfo is None:
+                        config_data["end_date"] = config_data["end_date"].replace(tzinfo=timezone.utc)
 
-            if "validation_thresholds" not in config_data:
-                config_data["validation_thresholds"] = ValidationThresholds().model_dump()
+                if "validation_thresholds" not in config_data:
+                    config_data["validation_thresholds"] = ValidationThresholds().model_dump()
 
-            if "validation_features" not in config_data:
-                config_data["validation_features"] = ValidationFeatures().model_dump()
+                if "validation_features" not in config_data:
+                    config_data["validation_features"] = ValidationFeatures().model_dump()
 
-            if "report_settings" not in config_data:
-                config_data["report_settings"] = ReportSettings().model_dump()
+                if "report_settings" not in config_data:
+                    config_data["report_settings"] = ReportSettings().model_dump()
 
-            if "score_weights" not in config_data:
-                config_data["score_weights"] = {
-                    "timeline": 0.20,
-                    "code_authenticity": 0.20,
-                    "rule_compliance": 0.15,
-                    "plagiarism": 0.10,
-                    "team_compliance": 0.10,
-                    "complexity": 0.10,
-                    "technology": 0.10,
-                    "commit_quality": 0.05
-                }
+                if "score_weights" not in config_data:
+                    config_data["score_weights"] = {
+                        "timeline": 0.20,
+                        "code_authenticity": 0.20,
+                        "rule_compliance": 0.15,
+                        "plagiarism": 0.10,
+                        "team_compliance": 0.10,
+                        "complexity": 0.10,
+                        "technology": 0.10,
+                        "commit_quality": 0.05
+                    }
 
-            config = HackathonConfig(**config_data)
-            self.current_config = config
-            return config
+                config = HackathonConfig(**config_data)
+                self.current_config = config
+                return config
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+ 
+            return None
 
     def list_available_configs(self) -> List[str]:
-        return [f.stem for f in self.CONFIG_DIR.glob("*.json") if f.stem != "global_settings"]
+        configs = []
+        for f in self.CONFIG_DIR.glob("*.json"):
+            if f.stem != "global_settings":
+ 
+                try:
+                    with open(f, 'r') as file:
+                        data = json.load(file)
+ 
+                        if all(key in data for key in ["name", "start_date", "end_date"]):
+                            configs.append(f.stem)
+                except (json.JSONDecodeError, KeyError):
+ 
+                    continue
+        
+        return configs
 
     def update_validation_thresholds(self, name: str, pass_threshold: float, review_threshold: float) -> bool:
         config = self.load_hackathon_config(name)
@@ -293,3 +316,131 @@ class ConfigManager:
     def update_batch_settings(self, settings: BatchValidationSettings) -> bool:
         self.global_settings.default_batch_settings = settings
         return self._save_global_settings(self.global_settings)
+
+    def wipe_github_token(self, username: str) -> bool:
+        """
+        Wipe the GitHub token for a specific user.
+        
+        Args:
+            username: GitHub username whose token should be wiped
+            
+        Returns:
+            True if token was wiped successfully, False otherwise
+        """
+        try:
+            keyring.delete_password(self.SERVICE_NAME, username)
+            return True
+        except keyring.errors.PasswordDeleteError:
+ 
+            return False
+
+    def wipe_hackathon_config(self, name: str) -> bool:
+        """
+        Delete a specific hackathon configuration.
+        
+        Args:
+            name: Name of the configuration to delete
+            
+        Returns:
+            True if config was deleted successfully, False otherwise
+        """
+        config_path = self.CONFIG_DIR / f"{name}.json"
+        if config_path.exists():
+            config_path.unlink()
+            if self.current_config and hasattr(self.current_config, 'name') and self.current_config.name == name:
+                self.current_config = None
+            return True
+        return False
+    
+    def wipe_all_configs(self) -> Tuple[int, List[str]]:
+        """
+        Delete all hackathon configurations.
+        
+        Returns:
+            Tuple of (count of deleted configs, list of deleted config names)
+        """
+        configs = self.list_available_configs()
+        deleted = []
+        
+        for name in configs:
+            if self.wipe_hackathon_config(name):
+                deleted.append(name)
+                
+        self.current_config = None
+        return len(deleted), deleted
+    
+    def wipe_cache(self) -> Tuple[int, List[str]]:
+        """
+        Delete all cached data.
+        
+        Returns:
+            Tuple of (count of deleted files, list of deleted directories)
+        """
+        cache_dirs = [
+            self.CONFIG_DIR / "cache" / "github",
+            self.CONFIG_DIR / "cache" / "secrets",
+            self.CONFIG_DIR / "cache" / "devpost",
+            self.CONFIG_DIR / "cache"
+        ]
+        
+        deleted_dirs = []
+        file_count = 0
+        
+        for cache_dir in cache_dirs:
+            if cache_dir.exists():
+ 
+                files = list(cache_dir.glob("**/*"))
+                file_count += len(files)
+                
+ 
+                for file in files:
+                    if file.is_file():
+                        file.unlink()
+                
+                deleted_dirs.append(str(cache_dir))
+                
+ 
+                if cache_dir != self.CONFIG_DIR / "cache":
+                    try:
+                        cache_dir.rmdir()  # This will only work if directory is empty
+                    except OSError:
+                        pass  # Directory not empty, that's okay
+        
+        return file_count, deleted_dirs
+    
+    def wipe_all_data(self, username: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Wipe all data (configs, cache, and optionally GitHub token).
+        
+        Args:
+            username: Optional GitHub username to wipe token for
+            
+        Returns:
+            Dictionary with results of wipe operation
+        """
+        results = {
+            "configs_deleted": 0,
+            "configs_names": [],
+            "cache_files_deleted": 0,
+            "cache_dirs_cleaned": [],
+            "token_deleted": False
+        }
+        
+ 
+        configs_count, configs_list = self.wipe_all_configs()
+        results["configs_deleted"] = configs_count
+        results["configs_names"] = configs_list
+        
+ 
+        cache_count, cache_dirs = self.wipe_cache()
+        results["cache_files_deleted"] = cache_count
+        results["cache_dirs_cleaned"] = cache_dirs
+        
+ 
+        if username:
+            results["token_deleted"] = self.wipe_github_token(username)
+        
+ 
+        self.current_config = None
+        
+        return results

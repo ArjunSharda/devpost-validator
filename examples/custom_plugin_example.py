@@ -1,78 +1,70 @@
+"""
+Custom Plugin Example for DevPost Validator
+
+This plugin demonstrates how to create a custom plugin for DevPost Validator.
+"""
 from devpost_validator.plugin_base import PluginBase
 from typing import List, Dict, Any
+import re
 
 
-class CustomPatternPlugin(PluginBase):
-    """Example plugin that checks for specific patterns in DevPost submissions."""
+class CustomExamplePlugin(PluginBase):
+    """
+    Example plugin that checks for potential hard-coded credentials and bad practices.
+    """
     
     def __init__(self):
-        super().__init__("CustomPatternPlugin")
+        super().__init__("CustomExamplePlugin")
     
     def initialize(self) -> bool:
+        """Initialize the plugin with any setup required"""
         print(f"Initializing {self.name}")
         return True
     
     def register_rules(self) -> List[Dict[str, Any]]:
+        """Register custom regex rules for validation"""
         return [
             {
-                "name": "excessive_buzzwords",
-                "pattern": r"\b(AI|ML|blockchain|IoT|cloud)\b.{0,30}\b(AI|ML|blockchain|IoT|cloud)\b.{0,30}\b(AI|ML|blockchain|IoT|cloud)\b",
-                "description": "Excessive use of tech buzzwords in close proximity",
-                "severity": "low"
+                "name": "example_private_key",
+                "pattern": r"-----BEGIN PRIVATE KEY-----",
+                "description": "Private key found in code",
+                "severity": "high"
             },
             {
-                "name": "vague_innovation_claim",
-                "pattern": r"\b(revolutionary|groundbreaking|disrupting|first-of-its-kind|game-changer)\b",
-                "description": "Vague claims of innovation without specific details",
+                "name": "example_placeholder_code",
+                "pattern": r"TODO: implement",
+                "description": "Placeholder code found",
                 "severity": "medium"
+            },
+            {
+                "name": "example_console_log",
+                "pattern": r"console\.log\(.+\)",
+                "description": "Debug console.log statement found",
+                "severity": "low"
             }
         ]
     
     def check_content(self, content: str) -> List[Dict[str, Any]]:
-        # You can implement custom validation logic here beyond just regex patterns
-        results = []
+        """Check content with custom logic beyond regex patterns"""
+        issues = []
         
-        # Example: Check if the description is too short
-        if len(content.split()) < 100:
-            results.append({
-                "rule": "content_too_short",
-                "description": "Project description seems too brief (less than 100 words)",
-                "severity": "medium",
-                "position": 0
-            })
-            
-        return results
+ 
+        base64_pattern = r"[A-Za-z0-9+/]{30,}={0,2}"
+        
+        for match in re.finditer(base64_pattern, content):
+ 
+            match_str = match.group(0)
+            if len(match_str) >= 40 and "=" in match_str[-2:]:
+                issues.append({
+                    "rule": "potential_base64_data",
+                    "description": "Potential Base64 encoded data or credential",
+                    "severity": "medium",
+                    "position": match.start(),
+                    "match": match_str[:10] + "..." + match_str[-5:]
+                })
+        
+        return issues
     
     def cleanup(self) -> None:
+        """Clean up resources when plugin is unloaded"""
         print(f"Cleaning up {self.name}")
-
-
-# Legacy format support - function-based plugin
-def check_content(content: str) -> List[Dict[str, Any]]:
-    """Legacy plugin function to check content."""
-    results = []
-    
-    # Check for excessive emojis
-    import re
-    emoji_pattern = re.compile(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F700-\U0001F77F\U0001F780-\U0001F7FF\U0001F800-\U0001F8FF\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002702-\U000027B0\U000024C2-\U0001F251]+')
-    emojis = emoji_pattern.findall(content)
-    if len(emojis) > 10:
-        results.append({
-            "rule": "excessive_emojis",
-            "description": f"Found {len(emojis)} emojis in the content, consider reducing for a more professional appearance",
-            "severity": "low",
-            "position": 0
-        })
-    
-    return results
-
-def register_rules():
-    """Legacy way to register rules."""
-    return [
-        {
-            "name": "clickbait_title",
-            "pattern": r"\b(you won't believe|mind-blowing|jaw-dropping|amazing|unbelievable)\b",
-            "description": "Clickbait title patterns detected",
-            "severity": "medium"
-        }
-    ]
